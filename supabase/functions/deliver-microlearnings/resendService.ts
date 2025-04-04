@@ -1,8 +1,6 @@
-// core/resendService.ts
+import { Resend } from "https://esm.sh/resend"; // ✅ ESM-compliant import for Edge Functions
 
-import { Resend } from 'resend';
-
-const resend = new Resend(import.meta.env?.VITE_RESEND_API_KEY || '');
+const resend = new Resend(Deno.env.get('RESEND_API_KEY') || '');
 
 interface EmailPayload {
   to: string;
@@ -14,7 +12,7 @@ interface EmailPayload {
 export const sendEmail = async ({ to, subject, html, from }: EmailPayload) => {
   try {
     const response = await resend.emails.send({
-      from: from || 'dhiva@resend.dev', // default sender fallback
+      from: from || 'dhiva@resend.dev', // fallback default
       to,
       subject,
       html,
