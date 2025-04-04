@@ -1,20 +1,17 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.7";
-import { Resend } from "npm:resend@3.2.0";
+import {
+  getLearnerProfile,
+  updateTable,
+  selectFrom
+} from '../../core/supabaseService';
+import { sendEmail } from '../../core/resendService';
 
-// CORS headers for cross-origin requests
+// CORS headers for Supabase edge function
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
-
-// Initialize clients
-const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-const supabase = createClient(supabaseUrl, supabaseKey);
-
-const resend = new Resend(Deno.env.get('RESEND_API_KEY'));
 
 interface Learner {
   id: string;
@@ -29,28 +26,12 @@ interface DeliveryResult {
   error?: string;
 }
 
-async function sendEmail(to: string, content: string, dayNumber: number, totalDays: number): Promise<void> {
-  await resend.emails.send({
-    from: 'Nataris <learning@nataris.com>',
-    to: [to],
-    subject: `Your Daily Nataris Learning - Day ${dayNumber}`,
-    html: `
-      <div style="max-width: 600px; margin: 0 auto; font-family: system-ui, sans-serif;">
-        ${content}
-        <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
-          <p style="color: #666;">Day ${dayNumber} of ${totalDays}</p>
-        </div>
-      </div>
-    `,
-  });
-}
-
 async function sendWhatsApp(to: string, content: string): Promise<void> {
-  const response = await fetch(`${supabaseUrl}/functions/v1/send-whatsapp`, {
+  const response = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/send-whatsapp`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${supabaseKey}`,
+      'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
     },
     body: JSON.stringify({
       phoneNumber: to,
@@ -71,16 +52,18 @@ async function logDelivery(
   success: boolean, 
   error?: string
 ): Promise<void> {
-  await supabase
-    .from('delivery_logs')
-    .insert({
+  await updateTable(
+    'delivery_logs',
+    {
       microlearning_id: microlearningId,
       learner_id: learnerId,
       delivery_method: method,
       success,
       error_message: error,
       delivered_at: new Date().toISOString()
-    });
+    },
+    []
+  );
 }
 
 async function deliverToLearner(
@@ -101,9 +84,14 @@ async function deliverToLearner(
             method: 'whatsapp',
             error: 'No phone number available'
           });
-          // Fallback to email if available
+
+          // Fallback to email
           if (learner.email) {
-            await sendEmail(learner.email, content, dayNumber, totalDays);
+            await sendEmail({
+              to: learner.email,
+              subject: `Your Daily Learning - Day ${dayNumber}`,
+              html: content
+            });
             results.push({ success: true, method: 'email' });
             await logDelivery(microlearningId, learner.id, 'email', true);
           }
@@ -121,14 +109,19 @@ async function deliverToLearner(
             method: 'email',
             error: 'No email address available'
           });
-          // Fallback to WhatsApp if available
+
+          // Fallback to WhatsApp
           if (learner.phone_number) {
             await sendWhatsApp(learner.phone_number, content);
             results.push({ success: true, method: 'whatsapp' });
             await logDelivery(microlearningId, learner.id, 'whatsapp', true);
           }
         } else {
-          await sendEmail(learner.email, content, dayNumber, totalDays);
+          await sendEmail({
+            to: learner.email,
+            subject: `Your Daily Learning - Day ${dayNumber}`,
+            html: content
+          });
           results.push({ success: true, method: 'email' });
           await logDelivery(microlearningId, learner.id, 'email', true);
         }
@@ -148,9 +141,12 @@ async function deliverToLearner(
         }
 
         if (learner.email) {
-          // Add 5-minute delay for email
-          await new Promise(resolve => setTimeout(resolve, 300000));
-          await sendEmail(learner.email, content, dayNumber, totalDays);
+          await new Promise(resolve => setTimeout(resolve, 300000)); // 5-min delay
+          await sendEmail({
+            to: learner.email,
+            subject: `Your Daily Learning - Day ${dayNumber}`,
+            html: content
+          });
           results.push({ success: true, method: 'email' });
           await logDelivery(microlearningId, learner.id, 'email', true);
         } else {
@@ -190,69 +186,59 @@ async function deliverToLearner(
 
 async function deliverMicrolearnings() {
   const now = new Date();
-  
-  // Get all pending microlearnings scheduled for now
-  const { data: pendingLearnings, error } = await supabase
-    .from('microlearnings')
-    .select(`
+
+  const { data: pendingLearnings } = await selectFrom(
+    'microlearnings',
+    `
       *,
       topics (
         name,
         user_id
       )
-    `)
-    .eq('status', 'pending')
-    .lte('scheduled_for', now.toISOString());
+    `,
+    [
+      { column: 'status', operator: 'eq', value: 'pending' },
+      { column: 'scheduled_for', operator: 'lte', value: now.toISOString() }
+    ]
+  );
 
-  if (error) throw error;
   if (!pendingLearnings?.length) return;
 
   for (const learning of pendingLearnings) {
     try {
-      // Get learner profile with delivery preferences
-      const { data: learner } = await supabase
-        .from('learner_profiles')
-        .select(`
-          id,
-          email,
-          phone_number,
-          delivery_preference
-        `)
-        .eq('user_id', learning.topics.user_id)
-        .single();
+      const { data: learner } = await getLearnerProfile(learning.topics.user_id, learning.topic_id);
 
       if (!learner) {
         console.error(`No learner profile found for user ${learning.topics.user_id}`);
         continue;
       }
 
-      // Get total days for this topic
-      const { count: totalDays } = await supabase
-        .from('microlearnings')
-        .select('*', { count: 'exact' })
-        .eq('topic_id', learning.topic_id);
+      const { data: totalDaysData } = await selectFrom(
+        'microlearnings',
+        '*',
+        [{ column: 'topic_id', operator: 'eq', value: learning.topic_id }]
+      );
+      const totalDays = totalDaysData?.length || 1;
 
-      // Deliver content based on preferences
       const deliveryResults = await deliverToLearner(
         learner,
         learning.content,
         learning.id,
         learning.day_number,
-        totalDays || 1
+        totalDays
       );
 
-      // Update microlearning status if at least one delivery method succeeded
       if (deliveryResults.some(result => result.success)) {
-        await supabase
-          .from('microlearnings')
-          .update({
+        await updateTable(
+          'microlearnings',
+          {
             status: 'sent',
             sent_at: new Date().toISOString(),
-          })
-          .eq('id', learning.id);
+          },
+          [{ column: 'id', operator: 'eq', value: learning.id }]
+        );
       }
 
-      // Log delivery results
       console.log(`Delivery results for microlearning ${learning.id}:`, deliveryResults);
 
     } catch (error) {
@@ -261,9 +247,8 @@ async function deliverMicrolearnings() {
   }
 }
 
-// This function will be triggered by a cron job
-Deno.serve(async (req) => {
-  // Handle CORS
+// This function will be triggered by Supabase cron job or direct call
+serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
@@ -271,26 +256,20 @@ Deno.serve(async (req) => {
   try {
     await deliverMicrolearnings();
 
-    return new Response(
-      JSON.stringify({ success: true }),
-      {
-        headers: {
-          ...corsHeaders,
-          'Content-Type': 'application/json',
-        },
+    return new Response(JSON.stringify({ success: true }), {
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/json',
       },
-    );
+    });
   } catch (error) {
     console.error('Error delivering microlearnings:', error);
-    return new Response(
-      JSON.stringify({ error: error.message }),
-      {
-        status: 500,
-        headers: {
-          ...corsHeaders,
-          'Content-Type': 'application/json',
-        },
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/json',
       },
-    );
+    });
   }
 });
