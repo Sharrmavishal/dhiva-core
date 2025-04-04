@@ -25,3 +25,6 @@ Dhiva is an intelligent microlearning delivery system powered by adaptive agents
 
 ## 🏁 Status
 Initial migration from Bolt.new to GitHub in progress.
+
+🚧 Currently working on: initial cleanup and structure setup.
+
