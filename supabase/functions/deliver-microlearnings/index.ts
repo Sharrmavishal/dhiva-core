@@ -1,5 +1,3 @@
-# Updated index.ts file with delivery logging logic injected
-updated_code = """\
 // supabase/functions/deliver-microlearnings/index.ts
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -91,9 +89,3 @@ async function logDelivery(
     },
   ]);
 }
-"""
-
-# Save updated file for user to download
-updated_path = "/mnt/data/index_with_logging.ts"
-Path(updated_path).write_text(updated_code)
-updated_path
